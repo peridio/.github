@@ -23,8 +23,8 @@ jobs:
           github-token: ${{ secrets.PERIDIO_READ_TOKEN }}
           script: |
             const fs = require('fs');
-            const { getOctokit } = require('@actions/github');
 
+            const Octokit = github.constructor;
             const orgTokens = {
               'peridio': process.env.PERIDIO_TOKEN,
               'avocado-linux': process.env.AVOCADO_TOKEN,
@@ -60,7 +60,7 @@ jobs:
             const sections = [];
 
             for (const [org, token] of Object.entries(orgTokens)) {
-              const octokit = getOctokit(token);
+              const octokit = new Octokit({ auth: token });
 
               // Dynamically fetch all non-fork repos in the org
               const repoList = await octokit.paginate(octokit.rest.repos.listForOrg, {
