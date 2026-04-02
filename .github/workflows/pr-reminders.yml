@@ -17,12 +17,18 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          PERIDIO_TOKEN: ${{ secrets.PERIDIO_READ_TOKEN }}
+          AVOCADO_TOKEN: ${{ secrets.AVOCADO_READ_TOKEN }}
         with:
-          github-token: ${{ secrets.ORG_READ_TOKEN }}
+          github-token: ${{ secrets.PERIDIO_READ_TOKEN }}
           script: |
             const fs = require('fs');
+            const { getOctokit } = require('@actions/github');
 
-            const orgs = ['peridio', 'avocado-linux'];
+            const orgTokens = {
+              'peridio': process.env.PERIDIO_TOKEN,
+              'avocado-linux': process.env.AVOCADO_TOKEN,
+            };
             const slackToken = process.env.SLACK_BOT_TOKEN;
             const slackChannel = process.env.SLACK_CHANNEL_ID;
 
@@ -53,16 +59,18 @@ jobs:
 
             const sections = [];
 
-            for (const org of orgs) {
+            for (const [org, token] of Object.entries(orgTokens)) {
+              const octokit = getOctokit(token);
+
               // Dynamically fetch all non-fork repos in the org
-              const repoList = await github.paginate(github.rest.repos.listForOrg, {
+              const repoList = await octokit.paginate(octokit.rest.repos.listForOrg, {
                 org,
                 type: 'sources',
                 per_page: 100,
               });
 
               for (const { name: repo } of repoList) {
-                const prs = await github.paginate(github.rest.pulls.list, {
+                const prs = await octokit.paginate(octokit.rest.pulls.list, {
                   owner: org,
                   repo,
                   state: 'open',
@@ -73,7 +81,7 @@ jobs:
                   if (pr.draft) continue;
 
                   // Get latest review state per reviewer
-                  const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                  const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
                     owner: org,
                     repo,
                     pull_number: pr.number,
@@ -91,7 +99,7 @@ jobs:
                   if (!hasChangesRequested) continue;
 
                   // Skip if author already re-requested review — native reminders cover that
-                  const { data: requested } = await github.rest.pulls.listRequestedReviewers({
+                  const { data: requested } = await octokit.rest.pulls.listRequestedReviewers({
                     owner: org,
                     repo,
                     pull_number: pr.number,
