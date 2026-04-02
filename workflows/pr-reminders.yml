@@ -1,0 +1,129 @@
+name: Custom PR Reminders
+
+on:
+  schedule:
+    - cron: '0 12 * * 1-5' # 8:00 AM ET (UTC-4), weekdays
+  workflow_dispatch:        # allow manual trigger for testing
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Send PR reminders to Slack
+        uses: actions/github-script@v7
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+        with:
+          github-token: ${{ secrets.ORG_READ_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            const orgs = ['peridio', 'avocado-linux'];
+            const slackToken = process.env.SLACK_BOT_TOKEN;
+            const slackChannel = process.env.SLACK_CHANNEL_ID;
+
+            // Load GitHub username → Slack user ID mapping
+            const userMap = JSON.parse(fs.readFileSync('user-map.json', 'utf8'));
+
+            function slackMention(githubUsername) {
+              const id = userMap[githubUsername];
+              return id ? `<@${id}>` : `@${githubUsername}`;
+            }
+
+            async function slackPost(text) {
+              const res = await fetch('https://slack.com/api/chat.postMessage', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${slackToken}`,
+                },
+                body: JSON.stringify({
+                  channel: slackChannel,
+                  text,
+                  unfurl_links: false,
+                }),
+              });
+              const data = await res.json();
+              if (!data.ok) throw new Error(`Slack error: ${data.error}`);
+            }
+
+            const sections = [];
+
+            for (const org of orgs) {
+              // Dynamically fetch all non-fork repos in the org
+              const repoList = await github.paginate(github.rest.repos.listForOrg, {
+                org,
+                type: 'sources',
+                per_page: 100,
+              });
+
+              for (const { name: repo } of repoList) {
+                const prs = await github.paginate(github.rest.pulls.list, {
+                  owner: org,
+                  repo,
+                  state: 'open',
+                  per_page: 100,
+                });
+
+                for (const pr of prs) {
+                  if (pr.draft) continue;
+
+                  // Get latest review state per reviewer
+                  const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                    owner: org,
+                    repo,
+                    pull_number: pr.number,
+                    per_page: 100,
+                  });
+
+                  const latestByReviewer = {};
+                  for (const review of reviews) {
+                    if (['APPROVED', 'CHANGES_REQUESTED'].includes(review.state)) {
+                      latestByReviewer[review.user.login] = review.state;
+                    }
+                  }
+
+                  const hasChangesRequested = Object.values(latestByReviewer).includes('CHANGES_REQUESTED');
+                  if (!hasChangesRequested) continue;
+
+                  // Skip if author already re-requested review — native reminders cover that
+                  const { data: requested } = await github.rest.pulls.listRequestedReviewers({
+                    owner: org,
+                    repo,
+                    pull_number: pr.number,
+                  });
+
+                  const waitingForReview =
+                    requested.users.length > 0 || requested.teams.length > 0;
+                  if (waitingForReview) continue;
+
+                  const ageDays = Math.floor(
+                    (Date.now() - new Date(pr.updated_at)) / (1000 * 60 * 60 * 24)
+                  );
+
+                  const author = slackMention(pr.user.login);
+                  sections.push(
+                    `• <${pr.html_url}|#${pr.number} ${pr.title}> — ${author} · stale ${ageDays}d`
+                  );
+                }
+              }
+            }
+
+            if (sections.length === 0) {
+              console.log('No PRs to remind about.');
+              return;
+            }
+
+            const text = [
+              '*🔁 PRs with changes requested — author action needed*',
+              '_Changes have been requested but no re-review has been requested yet._',
+              '',
+              ...sections,
+            ].join('\n');
+
+            await slackPost(text);
+            console.log(`Reminder sent for ${sections.length} PRs.`);
